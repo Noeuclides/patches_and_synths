@@ -11,6 +11,66 @@ s.reboot;
 )
 (
 SynthDef(\ruinerWithFeedback, {
+    |in=0, out=3, amp=0.5, gain=2, crushSteps=8, glitchRate=10,
+     dropoutChance=0.3, decayTime=0.08, mix=0.5, feedback=0.15,
+     tone=0.7, saturation=0.3|
+    var input, preamp, saturated, filtered, crushed;
+    var dropoutGate, smoothedGate;
+    var dry, wet, blended;
+    var fbIn, finalOut;
+    var inputLevel, compressedInput;
+
+    // Feedback input (safe loop)
+    fbIn = LocalIn.ar(1);
+
+    // Input processing with dynamics preservation
+    input = SoundIn.ar(in) + (fbIn * feedback);
+
+    // Gentle input level detection for dynamics
+    inputLevel = Amplitude.kr(input, 0.01, 0.1);
+
+    // Soft compression to preserve some dynamics
+    compressedInput = Compander.ar(input, input,
+        thresh: 0.3,
+        slopeBelow: 1.0,
+        slopeAbove: 0.4,
+        clampTime: 0.002,
+        relaxTime: 0.05
+    );
+
+    // Analog-style preamp with softer saturation
+    preamp = compressedInput * gain;
+    saturated = (preamp * (1 + saturation)).tanh / (1 + saturation);
+
+    // Tone control (low-pass filtering)
+    filtered = LPF.ar(saturated, tone.linexp(0, 1, 800, 12000));
+
+    // Gentler bit crushing with variable steps
+    crushed = (filtered * crushSteps).round / crushSteps;
+
+    // More musical dropout with smoother transitions
+    dropoutGate = LFNoise1.kr(glitchRate).range(0, 1) > dropoutChance;
+    smoothedGate = Lag.kr(dropoutGate, decayTime);
+
+    // Preserve original dynamics in dry signal
+    dry = LeakDC.ar(filtered * (0.3 + (inputLevel * 0.7)));
+    wet = LeakDC.ar(crushed * smoothedGate);
+
+    // Crossfade with softer curve
+    blended = (dry * (1 - mix)) + (wet * mix);
+
+    // Send to feedback with limiting
+    LocalOut.ar(blended.tanh * 0.8);
+
+    // Final output with gentle limiting
+    finalOut = blended * amp;
+    finalOut = finalOut.tanh; // soft limiting
+
+    Out.ar(out, finalOut ! 2);
+}).add;
+)
+(
+SynthDef(\ruinerWithFeedback, {
     |in=0, out=3, amp=0.3, gain=5, crushSteps=32, glitchRate=30,
      dropoutChance=0.5, decayTime=0.03, mix=1.0, feedback=0.2|
     var input, boosted, clipped, crushed;
@@ -28,7 +88,7 @@ SynthDef(\ruinerWithFeedback, {
     crushed = (clipped * crushSteps).round * (1 / crushSteps);
 
     // Dropout control
-    dropoutGate = LFNoise0.kr(glitchRate).range(0, 1) > dropoutChance;
+    dropoutGate = LFNoise1.kr(glitchRate).range(0, 1) > dropoutChance;
     smoothedGate = Lag.kr(dropoutGate, decayTime);
 
     // Dry = always distorted, Wet = distorted + dropouts
