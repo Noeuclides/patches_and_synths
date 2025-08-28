@@ -1,6 +1,8 @@
 // Initialize MIDI
+(
 MIDIClient.init;
 MIDIIn.connectAll;
+)
 
 // Sound setup
 (
@@ -9,12 +11,12 @@ s.options.numInputBusChannels = 8;
 s.options.numOutputBusChannels = 10;
 s.reboot;
 )
+
 (
 SynthDef(\ruinerWithFeedback, {
-    |in=0, out=3, amp=0.5, gain=2, crushSteps=8, glitchRate=10,
-     dropoutChance=0.3, decayTime=0.08, mix=0.5, feedback=0.0,
-     tone=0.7, saturation=0.3|
-    var input, preamp, saturated, filtered, crushed;
+    |in=0, out=3, amp=0.5, glitchRate=10,
+     dropoutChance=0.3, decayTime=0.08, mix=0.5, feedback=0.0|
+    var input;
     var dropoutGate, smoothedGate;
     var dry, wet, blended;
     var fbIn, finalOut;
@@ -38,23 +40,12 @@ SynthDef(\ruinerWithFeedback, {
         relaxTime: 0.05
     );
 
-    // Analog-style preamp with softer saturation
-    preamp = compressedInput * gain;
-    saturated = (preamp * (1 + saturation)).tanh / (1 + saturation);
-
-    // Tone control (low-pass filtering)
-    filtered = LPF.ar(saturated, tone.linexp(0, 1, 800, 12000));
-
-    // Gentler bit crushing with variable steps
-    crushed = (filtered * crushSteps).round / crushSteps;
-
     // More musical dropout with smoother transitions
     dropoutGate = LFNoise1.kr(glitchRate).range(0, 1) > dropoutChance;
     smoothedGate = Lag.kr(dropoutGate, decayTime);
 
-    // Preserve original dynamics in dry signal
-    dry = LeakDC.ar(filtered * (0.3 + (inputLevel * 0.7)));
-    wet = LeakDC.ar(crushed * smoothedGate);
+	dry = LeakDC.ar(input);
+    wet = LeakDC.ar(input * smoothedGate);
 
     // Crossfade with softer curve
     blended = (dry * (1 - mix)) + (wet * mix);
@@ -72,22 +63,25 @@ SynthDef(\ruinerWithFeedback, {
 
 x = Synth(\ruinerWithFeedback, [\in, 0]);
 
-// Enhanced GUI with MIDI control
+// Enhanced GUI with MIDI control and bypass
 (
-~ruinerGui = Window("Ruiner Pedal", Rect(100, 100, 400, 350));
+~ruinerGui = Window("Ruiner Pedal", Rect(100, 100, 400, 450));
 ~ruinerGui.layout = VLayout.new;
 
 // Store slider references for MIDI control
 ~sliders = IdentityDictionary.new;
 
+// Store bypass state and last mix value
+~bypassState = false;
+~lastMixValue = 0.5;
+
 // Parameter configurations: [label, param, min, max, init]
 ~params = [
-    ["Gain", \gain, 0, 30, 5],
-    ["Glitch Mix", \mix, 0, 1, 1.0],
-    ["Drop Chance", \dropoutChance, 0, 1, 0.4],
-    ["Glitch Rate", \glitchRate, 1, 60, 30],
-    ["Decay Time", \decayTime, 0.001, 0.2, 0.03],
-    ["Feedback", \feedback, 0, 0.7, 0.2]
+    ["Glitch Mix", \mix, 0, 1, 1],
+    ["Drop Chance", \dropoutChance, 0, 1, 0.3],
+    ["Glitch Rate", \glitchRate, 0.1, 30, 22],
+    ["Decay Time", \decayTime, 0.01, 0.5, 0.18],
+    ["Feedback", \feedback, 0, 0.5, 0.0]
 ];
 
 ~makeSlider = { |label, param, min=0, max=1, init=0.5|
@@ -107,6 +101,11 @@ x = Synth(\ruinerWithFeedback, [\in, 0]);
             var actual = slider.value.linlin(0, 1, min, max);
             x.set(param, actual);
             valueText.string_(actual.round(0.001).asString);
+
+            // Store mix value when changed
+            if (param == \mix) {
+                ~lastMixValue = actual;
+            };
         });
 
     valueText = StaticText.new
@@ -114,7 +113,7 @@ x = Synth(\ruinerWithFeedback, [\in, 0]);
         .align_(\right)
         .fixedWidth_(60);
 
-    // Store slider reference with CC number as key
+    // Store slider reference with param as key
     ~sliders[param] = [slider, min, max, valueText];
 
     row.add(labelText);
@@ -128,23 +127,72 @@ x = Synth(\ruinerWithFeedback, [\in, 0]);
     ~makeSlider.(paramConfig[0], paramConfig[1], paramConfig[2], paramConfig[3], paramConfig[4]);
 });
 
-// Add MIDI status display
-~ruinerGui.layout.add(nil); // spacer
+// Add spacer
+~ruinerGui.layout.add(nil);
+
+// Bypass button
+~bypassButton = Button.new
+    .states_([["BYPASS", Color.red, Color.white], ["ACTIVE", Color.green, Color.white]])
+    .value_(1) // start active
+    .action_({ |button|
+        ~bypassState = button.value == 0;
+        if (~bypassState) {
+            x.set(\mix, 0); // full dry signal
+            ~statusText.string_("STATUS: BYPASSED (Press 'V' to toggle)");
+            ~statusText.background_(Color.red(0.2));
+        } {
+            // restore last mix setting
+            x.set(\mix, ~lastMixValue);
+            ~statusText.string_("STATUS: ACTIVE (Press 'V' to toggle)");
+            ~statusText.background_(Color.green(0.2));
+        };
+    });
+~ruinerGui.layout.add(~bypassButton);
+
+~statusText = StaticText.new
+    .string_("STATUS: ACTIVE (Press 'V' to toggle)")
+    .align_(\center)
+    .background_(Color.green(0.2));
+~ruinerGui.layout.add(~statusText);
+
+// Add spacer
+~ruinerGui.layout.add(nil);
+
 ~midiStatus = StaticText.new
-    .string_("MIDI: Waiting for LPD8...")
+    .string_("MIDI: Waiting for controller...")
     .align_(\center);
 ~ruinerGui.layout.add(~midiStatus);
 
 ~ruinerGui.front;
 
+// Keyboard control for bypass (V key)
+~ruinerGui.view.keyDownAction_({ |view, char, modifiers, unicode, keycode|
+    if (char == $v or: { char == $V }) {
+        ~bypassState = ~bypassState.not;
+        ~bypassButton.value_(~bypassState.not.asInteger);
+
+        if (~bypassState) {
+            x.set(\mix, 0); // bypass - full dry
+            ~statusText.string_("STATUS: BYPASSED (Press 'V' to toggle)");
+            ~statusText.background_(Color.red(0.2));
+        } {
+            x.set(\mix, ~lastMixValue); // restore effect
+            ~statusText.string_("STATUS: ACTIVE (Press 'V' to toggle)");
+            ~statusText.background_(Color.green(0.2));
+        };
+    };
+});
+
+// Make sure window can receive key events
+~ruinerGui.view.focus;
+
 // MIDI Control Setup
 ~ccMap = IdentityDictionary[
-    70 -> \gain,
-    71 -> \mix,
-    72 -> \dropoutChance,
-    73 -> \glitchRate,
-    74 -> \decayTime,
-    75 -> \feedback
+    70 -> \mix,
+    71 -> \dropoutChance,
+    72 -> \glitchRate,
+    73 -> \decayTime,
+    74 -> \feedback
 ];
 
 // MIDI CC responder
@@ -169,30 +217,37 @@ x = Synth(\ruinerWithFeedback, [\in, 0]);
             {
                 slider.value_(normalizedVal);
                 valueText.string_(actualVal.round(0.001).asString);
-                ~midiStatus.string_("MIDI: CC" ++ cc ++ " -> " ++ param ++ " = " ++ actualVal.round(0.01));
+                if (~midiStatus.notNil) {
+                    ~midiStatus.string_("MIDI: CC" ++ cc ++ " -> " ++ param ++ " = " ++ actualVal.round(0.01));
+                };
             }.defer;
 
             // Update synth
             x.set(param, actualVal);
+
+            // Store mix value when changed via MIDI
+            if (param == \mix) {
+                ~lastMixValue = actualVal;
+            };
         };
     };
 });
 
 // Cleanup function
 ~cleanup = {
-    ~midiCC.free;
-    ~ruinerGui.close;
-    x.free;
+    if (~midiCC.notNil) { ~midiCC.free };
+    if (~ruinerGui.notNil) { ~ruinerGui.close };
+    if (x.notNil) { x.free };
 };
 
 ~ruinerGui.onClose_({
     ~cleanup.();
 });
 
-"Ruiner Pedal with MIDI control ready!".postln;
+"Ruiner Pedal with MIDI control and V-key bypass ready!".postln;
 "CC Mapping:".postln;
 ~ccMap.keysValuesDo({ |cc, param|
     ("CC" ++ cc ++ " -> " ++ param).postln;
 });
+"Press 'V' key (with GUI focused) to bypass/activate".postln;
 )
-
