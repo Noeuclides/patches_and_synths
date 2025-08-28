@@ -15,7 +15,7 @@ s.reboot;
 (
 SynthDef(\ruinerWithFeedback, {
     |in=0, out=3, amp=0.5, glitchRate=10,
-     dropoutChance=0.3, decayTime=0.08, mix=0.5, feedback=0.0|
+     dropoutChance=0.3, decayTime=0.08, mix=1, feedback=0.0|
     var input;
     var dropoutGate, smoothedGate;
     var dry, wet, blended;
@@ -77,11 +77,10 @@ x = Synth(\ruinerWithFeedback, [\in, 0]);
 
 // Parameter configurations: [label, param, min, max, init]
 ~params = [
-    ["Glitch Mix", \mix, 0, 1, 1],
     ["Drop Chance", \dropoutChance, 0, 1, 0.3],
     ["Glitch Rate", \glitchRate, 0.1, 30, 22],
     ["Decay Time", \decayTime, 0.01, 0.5, 0.18],
-    ["Feedback", \feedback, 0, 0.5, 0.0]
+    ["Feedback", \feedback, 0, 2, 0.0]
 ];
 
 ~makeSlider = { |label, param, min=0, max=1, init=0.5|
@@ -188,11 +187,10 @@ x = Synth(\ruinerWithFeedback, [\in, 0]);
 
 // MIDI Control Setup
 ~ccMap = IdentityDictionary[
-    70 -> \mix,
-    71 -> \dropoutChance,
-    72 -> \glitchRate,
-    73 -> \decayTime,
-    74 -> \feedback
+    70 -> \dropoutChance,
+    71 -> \glitchRate,
+    72 -> \decayTime,
+    73 -> \feedback
 ];
 
 // MIDI CC responder
