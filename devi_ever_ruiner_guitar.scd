@@ -12,7 +12,7 @@ s.reboot;
 (
 SynthDef(\ruinerWithFeedback, {
     |in=0, out=3, amp=0.5, gain=2, crushSteps=8, glitchRate=10,
-     dropoutChance=0.3, decayTime=0.08, mix=0.5, feedback=0.15,
+     dropoutChance=0.3, decayTime=0.08, mix=0.5, feedback=0.0,
      tone=0.7, saturation=0.3|
     var input, preamp, saturated, filtered, crushed;
     var dropoutGate, smoothedGate;
@@ -66,41 +66,6 @@ SynthDef(\ruinerWithFeedback, {
     finalOut = blended * amp;
     finalOut = finalOut.tanh; // soft limiting
 
-    Out.ar(out, finalOut ! 2);
-}).add;
-)
-(
-SynthDef(\ruinerWithFeedback, {
-    |in=0, out=3, amp=0.3, gain=5, crushSteps=32, glitchRate=30,
-     dropoutChance=0.5, decayTime=0.03, mix=1.0, feedback=0.2|
-    var input, boosted, clipped, crushed;
-    var dropoutGate, smoothedGate;
-    var dry, wet, blended;
-    var fbIn, fbSig, finalOut;
-
-    // Feedback input (safe loop)
-    fbIn = LocalIn.ar(1); // mono feedback
-
-    // Input + optional feedback mix
-    input = SoundIn.ar(in) + (fbIn * feedback);
-    boosted = input * gain;
-    clipped = boosted.clip2(0.9);
-    crushed = (clipped * crushSteps).round * (1 / crushSteps);
-
-    // Dropout control
-    dropoutGate = LFNoise1.kr(glitchRate).range(0, 1) > dropoutChance;
-    smoothedGate = Lag.kr(dropoutGate, decayTime);
-
-    // Dry = always distorted, Wet = distorted + dropouts
-    dry = crushed;
-    wet = crushed * smoothedGate;
-    blended = XFade2.ar(dry, wet, (mix * 2) - 1);
-
-    // Send signal into feedback loop
-    LocalOut.ar(blended);
-
-    // Final output
-    finalOut = blended * amp;
     Out.ar(out, finalOut ! 2);
 }).add;
 )
@@ -230,3 +195,4 @@ x = Synth(\ruinerWithFeedback, [\in, 0]);
     ("CC" ++ cc ++ " -> " ++ param).postln;
 });
 )
+
