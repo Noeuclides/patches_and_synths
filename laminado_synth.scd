@@ -3,57 +3,65 @@
 // ==========================================
 // Attack: triggerable sample with variable length & start position
 // Sustain: rich subtractive body with character, grit, movement
-
+(
+    ~reverbBus = Bus.audio(s, 2);
+    ~percBuffer = Buffer.read(s, "/Users/nicolas/Music/Logic/laminado_sampler.wav");
+	//~percBuffer.notNil.if({ ~percBuffer.numFrames.postln; });
+	//"AHHHH".postln;
+)
+Server.default.options.numInputBusChannels=0;
 (
 // ==========================================
 // 1. BOOT SERVER & CREATE BUSES FIRST
 // ==========================================
 s.waitForBoot({
-    
-    // Create reverb bus BEFORE SynthDefs
-    ~reverbBus = Bus.audio(s, 2);
-    
-    // Load your percussive sample here
-    // Replace path with your actual 5-second recording
-    ~percBuffer = Buffer.read(s, "/Users/nicolas/Music/Logic/laminado_sampler.wav");
+
+	~reverbBus = Bus.audio(s, 2);
+    ~percBuffer = Buffer.read(s, "/Users/nicolas/Music/Logic/laminado_sampler441.wav");
+	//~percBuffer.notNil.if({ ~percBuffer.numFrames.postln; });
 
     s.sync;
-    
+
     // ==========================================
     // 2. MAIN SYNTHDEF
     // ==========================================
     SynthDef(\percussiveGrit, {
-        |out=0, gate=1, freq=110, amp=0.4, 
-        reverbBus=10,           // reverb send bus (will be set at creation)
-        
+        |out=0, gate=1, freq=110, amp=0.4, ampSample=0, ampSynth=0,
+        reverbBus=10,           // reverb send bus
+
         // Sample attack controls
         attackLen=2,          // how long the sample plays (0.05 to 1.0)
         attackStart=0,          // random start position within sample (0 to 1)
-        attackVol=0.8,          // sample loudness
-        
+        attackVol=1,          // sample loudness
+
         // Sustain body controls
+		sustainRel=1.8
         pressure=0.5,           // opens harmonics, adds grit (0 to 1)
         grit=0.4,               // distortion/saturation amount
         cutoff=0.6,             // filter frequency (0 to 1, musical scale)
         resonance=0.3,          // filter Q
         drift=0.2,              // slow pitch/filter instability
         space=0.3,              // reverb send
-        pan=0|
-        
+        pan=0,
+		synthAttack=1,
+		activeOsc2=0,
+		activeSub=1,
+		activeNoise=0|
+
         var sampleSig, synthSig, sig;
         var envAttack, envSustain, envTone, envPressure;
         var osc1, osc2, sub, noise, body;
         var filt, sat, shaped;
         var driftFreq, driftFilt;
         var sampleDur, sampleStartFrame;
-        var bufnum;
-        
+        var bufnum, bufFrames, hasBuf;
+
         // ==========================================
         // ENVELOPES
         // ==========================================
-        
+
         // Sample attack envelope - quick fade in, hold, quick fade out
-        sampleDur = attackLen.clip(0.05, 1.0);
+        sampleDur = attackLen.clip(0.05, 3.5);
         envAttack = EnvGen.kr(
             Env([0, 1, 1, 0], [0.002, sampleDur - 0.012, 0.01], \sin),
             gate
@@ -61,135 +69,134 @@ s.waitForBoot({
 
         // Sustain body envelope - slow attack, infinite sustain, slow release
         envSustain = EnvGen.kr(
-            Env.asr(2.5, 1.0, 2.5, \sin),
+            Env.asr(1, 0.2, sustainRel, \lin),
             gate,
             doneAction: 2
         );
-        
+
         // Tonal evolution - blooms open over time
         envTone = EnvGen.kr(
             Env([0.2, 1.0, 0.7], [1.2, 3.0], [\exp, \sin]),
             gate
         );
-        
+
         // Pressure envelope - maps physical effort to timbre
         envPressure = pressure.lag(0.05) * envTone;
-        
+
         // ==========================================
+        // SAMPLE ATTACK (handles mono or stereo buffers)
+        // ==========================================
+        bufnum = \buf.kr(0);
+
+        // If buffer is mono, change numChannels to 1
+        sampleSig = PlayBuf.ar(
+            2, // CHANGE THIS: 1 for mono samples, 2 for stereo samples
+            bufnum,
+            BufRateScale.kr(bufnum),
+            startPos: attackStart.linlin(0, 1, 0,
+                (BufFrames.kr(bufnum) - (sampleDur * SampleRate.ir)).max(0)),
+            loop: 0
+        );
+
+        // Mix stereo to mono for processing
+        sampleSig = (sampleSig[0] + sampleSig[1]) * 0.5;
+
+		bufFrames = BufFrames.kr(bufnum);
+		hasBuf = bufFrames > 0;
+		// Mute if no valid buffer
+        sampleSig = sampleSig * hasBuf;
+
+        sampleSig = sampleSig * envAttack * attackVol;
+
+		// ==========================================
         // DRIFT & INSTABILITY
         // ==========================================
         // Slow wandering pitch and filter - "breathing"
         driftFreq = LFNoise1.kr(0.3).bipolar(drift * 8); // ±cents
         driftFilt = LFNoise1.kr(0.15).range(0.92, 1.08); // subtle filter wander
-        
-        // ==========================================
-        // SAMPLE ATTACK (handles mono or stereo buffers)
-        // ==========================================
-        bufnum = \buf.kr(0);
-        
-        // PlayBuf for stereo buffers (most common for recordings)
-        // If your buffer is mono, change numChannels to 1
-        sampleSig = PlayBuf.ar(
-            2, // CHANGE THIS: 1 for mono samples, 2 for stereo samples
-            bufnum,
-            BufRateScale.kr(bufnum),
-            startPos: attackStart.linlin(0, 1, 0, 
-                (BufFrames.kr(bufnum) - (sampleDur * SampleRate.ir)).max(0)),
-            loop: 0
-        );
-        
-        // Mix stereo to mono for processing
-        sampleSig = (sampleSig[0] + sampleSig[1]) * 0.5;
-        
-        // Mute if no valid buffer
-        sampleSig = sampleSig * (bufnum > 0);
-        
-        sampleSig = sampleSig * envAttack * attackVol;
-        
+
         // ==========================================
         // SYNTH BODY - Rich subtractive layers
         // ==========================================
-        
+
         // Main oscillator - saw with slight detuning for width
-        osc1 = Saw.ar(freq * (1 + driftFreq.midiratio)) 
-             + Saw.ar(freq * (1 + driftFreq.midiratio) * 1.004); 
+        osc1 = Saw.ar(freq * (1 + driftFreq.midiratio)) + Saw.ar(freq * (1 + driftFreq.midiratio) * 1.004);
         osc1 = osc1 * 0.35;
-        
+
         // Secondary layer - pulse with pressure-modulated width
         osc2 = Pulse.ar(
-            freq * 0.5 * (1 + driftFreq.midiratio), 
+            freq * 0.5 * (1 + driftFreq.midiratio),
             (0.3 + (envPressure * 0.4)).clip(0.05, 0.95)
         );
-        osc2 = osc2 * 0.25;
-        
+        osc2 = osc2 * 0.25 * activeOsc2;
+
         // Sub bass - solid low end
-        sub = SinOsc.ar(freq * 0.5) * 0.3;
-        
+        sub = SinOsc.ar(freq * 0.5) * 0.3 * activeSub;
+
         // Air/noise layer - increases with pressure (bow scrape, breath)
         noise = LPF.ar(
-            PinkNoise.ar(envPressure * 0.15),
+            PinkNoise.ar(envPressure * 0.5),
             freq * 4
-        );
-        
+        ) * activeNoise;
+
         // Combine sources
-        body = osc1 + osc2 + sub + noise;
-        
+		body = osc1 + osc2 + sub + noise;
+
         // ==========================================
         // FILTER - Musical cutoff with pressure
         // ==========================================
         filt = RLPF.ar(
             body,
-            (cutoff.linexp(0, 1, 120, 8000) * 
-             (0.5 + (envPressure * 2.5)) * 
+            (cutoff.linexp(0, 1, 120, 8000) *
+             (0.5 + (envPressure * 2.5)) *
              driftFilt).clip(80, 12000),
             (1 - (resonance * 0.7)).clip(0.1, 0.95)
         );
-        
+
         // Secondary resonance pass for character
         filt = BPF.ar(filt, freq * 2, 1.5, 2) + filt;
-        
+
         // ==========================================
         // SATURATION - Asymmetric grit, amp-like
         // ==========================================
         // Dual-stage waveshaping for richness
         shaped = (filt * (1 + (grit * 3))).tanh;
         shaped = (shaped * (1 + (envPressure * grit * 2))).clip(-0.95, 1.0);
-        
+
         // Soft clip final to prevent harshness
         sat = (shaped * 1.4).softclip * 0.7;
-        
+
         // ==========================================
         // MIX SAMPLE + SYNTH
         // ==========================================
         synthSig = sat * envSustain;
-        
-        // Sample is LOUDER and more present (1.8x instead of 1.2x)
+
         // Synth body stays quieter during attack phase
-        sig = (sampleSig * 1.8) + (synthSig * amp * 0.7);
-        
+		sig = (sampleSig * ampSample) + (synthSig * amp * ampSynth * 0.7);
+
         // ==========================================
         // STEREO & OUTPUT
         // ==========================================
         sig = Pan2.ar(sig, pan);
-        
+
         // Direct output
         Out.ar(out, sig * (1 - space));
-        
+
         // Send to reverb bus
         Out.ar(reverbBus, sig * space);
-        
+
     }).add;
-    
+
     // ==========================================
     // 3. GLOBAL REVERB (Simple but effective)
     // ==========================================
-    
+
     SynthDef(\globalReverb, {
         |in, out=0, size=0.7, damp=0.5, mix=0.4|
         var sig, verb;
-        
+
         sig = In.ar(in, 2);
-        
+
         // FreeVerb - efficient, sounds good for this context
         verb = FreeVerb2.ar(
             sig[0], sig[1],
@@ -197,22 +204,22 @@ s.waitForBoot({
             room: size.linlin(0, 1, 0.5, 0.97),
             damp: damp
         );
-        
+
         Out.ar(out, verb * mix);
     }).add;
-    
+
     s.sync;
-    
+
     // Start reverb node
     ~reverbNode = Synth(\globalReverb, [
         \in, ~reverbBus,
         \size, 0.75,
         \mix, 0.35
     ], addAction: \addToTail);
-    
-    "=== PERCUSSIVE GRIT SYNTH READY ===".postln;
-    "~reverbBus: %".format(~reverbBus.index).postln;
-    "~percBuffer: % (replace path if needed)".format(~percBuffer.bufnum).postln;
+
+    //"=== PERCUSSIVE GRIT SYNTH READY ===".postln;
+    //"~reverbBus: %".format(~reverbBus.index).postln;
+    //"~percBuffer: % (replace path if needed)".format(~percBuffer.bufnum).postln;
 });
 )
 
@@ -267,11 +274,11 @@ Pbind(
     \dur, Pwhite(2.0, 5.0),
     \midinote, Prand([38, 41, 45, 50], inf),
     \amp, 0.4,
-    
+
     // Pass buses/buffers
     \reverbBus, ~reverbBus,
     \buf, Pfunc({ if(~percBuffer.notNil, { ~percBuffer.bufnum }, { 0 }) }),
-    
+
     // Randomize attack sample behavior
     \attackLen, Pwhite(1, 3.5),
     \attackStart, Pwhite(0.0, 1),
@@ -283,10 +290,10 @@ Pbind(
     \cutoff, Pwhite(0.3, 0.7),
     \resonance, Pwhite(0.2, 0.5),
     \drift, Pwhite(0.1, 0.4),
-    
+
     \space, Pwhite(0.2, 0.5),
     \pan, Pwhite(-0.5, 0.5),
-    
+
     \legato, Pwhite(0.8, 1.2)
 ).play;
 )
@@ -324,42 +331,81 @@ MIDIIn.connectAll;
 
 // Store notes in dictionary by note number (allows multiple notes)
 ~activeNotes = IdentityDictionary.new;
+~ccState = IdentityDictionary[
+    \ampSample -> 0.7,
+    \ampSynth  -> 0.8,
+    \pressure  -> 0.5,
+    \grit      -> 0.4,
+    \cutoff    -> 0.6,
+    \space     -> 0.3,
+    \drift     -> 0.2,
+    \resonance -> 0.3
+];
+
+// helper to update all active notes and remember the last value
+~setAll = { |key, val|
+    ~ccState[key] = val;
+    ~activeNotes.do { |node| node.set(key, val) };
+};
+
 
 // Example MIDI CC mapping (adjust CC numbers to your controller)
 MIDIdef.cc(\pressureControl, { |val|
-    ~activeNotes.do({ |note|
-        note.set(\pressure, val.linlin(0, 127, 0, 1));
-    });
+	~setAll.(\pressure, val.linlin(0, 127, 0, 1));
 }, 1); // CC1 = Mod wheel
 
 MIDIdef.cc(\gritControl, { |val|
-    ~activeNotes.do({ |note|
-        note.set(\grit, val.linlin(0, 127, 0, 1));
-    });
-}, 74); // CC74
+	~setAll.(\grit, val.linlin(0, 127, 0, 1));
+}, 2); // CC74
 
 MIDIdef.cc(\cutoffControl, { |val|
-    ~activeNotes.do({ |note|
-        note.set(\cutoff, val.linlin(0, 127, 0, 1));
-    });
-}, 71); // CC71
+	~setAll.(\cutoff, val.linlin(0, 127, 0, 1));
+}, 3); // CC71
 
 MIDIdef.cc(\spaceControl, { |val|
-    ~activeNotes.do({ |note|
-        note.set(\space, val.linlin(0, 127, 0, 0.8));
-    });
-}, 91); // CC91 = Reverb
+	~setAll.(\space, val.linlin(0, 127, 0, 0.8));
+}, 4); // CC91 = Reverb
+
+MIDIdef.cc(\driftControl, { |val|
+	~setAll.(\drift, val.linlin(0,127, 0,1));
+}, 5); // CC91 = drift
+
+MIDIdef.cc(\resoControl, { |val|
+	~setAll.(\resonance, val.linlin(0,127, 0,1));
+}, 6);
+
+MIDIdef.cc(\ampSampleControl, { |val|
+    ~setAll.(\ampSample, val.linlin(0,127, 0,1));
+	//"ampSample: %, %".format(val.linlin(0, 127, 0, 1), val).postln;
+}, 7);
+
+MIDIdef.cc(\ampSynthControl, { |val|
+    ~setAll.(\ampSynth,  val.linlin(0,127, 0,1));
+	//"ampSynth: %, %".format(val.linlin(0, 127, 0, 1), val).postln;
+}, 8); // CC91 = resonance
 
 MIDIdef.noteOn(\noteOnHandler, { |vel, num|
-    // Create new synth for this note
-    ~activeNotes[num] = Synth(\percussiveGrit, [
-        \freq, num.midicps,
-        \amp, vel.linlin(0, 127, 0, 0.8),
-        \reverbBus, ~reverbBus,
-        \buf, if(~percBuffer.notNil, { ~percBuffer.bufnum }, { 0 }),
-        \attackLen, exprand(0.2, 0.6),
-        \attackStart, rrand(0.0, 0.5)
-    ]);
+    var params = [
+        \freq,       num.midicps,
+        \amp,        vel.linlin(0, 127, 0, 0.8),
+        \reverbBus,  ~reverbBus,
+        \buf,        if(~percBuffer.notNil, { ~percBuffer.bufnum }, { 0 }),
+        \attackLen,  vel.linlin(0, 127, 3, 0.8),
+        \attackStart, rrand(0.0, 1),
+
+        // Persisted CC values applied to the new note:
+        \ampSample,  ~ccState[\ampSample],
+        \ampSynth,   ~ccState[\ampSynth],
+        \pressure,   ~ccState[\pressure],
+        \grit,       ~ccState[\grit],
+        \cutoff,     ~ccState[\cutoff],
+        \space,      ~ccState[\space],
+        \drift,      ~ccState[\drift],
+        \resonance,  ~ccState[\resonance]
+    ];
+
+    ~activeNotes[num] = Synth(\percussiveGrit, params);
+	//"CC #% - vel: %".format(num, vel).postln
 });
 
 MIDIdef.noteOff(\noteOffHandler, { |vel, num|
@@ -370,3 +416,32 @@ MIDIdef.noteOff(\noteOffHandler, { |vel, num|
     });
 });
 )
+
+
+{
+EnvGen.kr(
+            Env([0.2, 1.0, 0.7], [1.2, 3.0], [\exp, \sin]),
+            1.
+)}.plot(duration: 1);
+
+{
+ EnvGen.kr(
+            Env([0, 1, 1, 0], [0.002, 2 - 0.012, 0.01], \sin),
+            1
+)}.plot(duration: 2);
+
+{LFNoise1.kr(0.3).bipolar(0.2 * 8)}.plot(duration: 2);
+
+1.clip(0.05, 2.0);
+
+MIDIdef.cc(\ccDebug, {|val, num, chan, src|
+	"CC #% - val: %".format(num, val).postln
+})
+
+rrand(0.0, 0.5).postln;
+100.linlin(0, 127, 0.8, 0);
+
+
+{Env.asr(1, 1.0, 1, \sin)}.plot(duration: 1);
+Env.asr(1, 0.2, 1.8, \lin).test(2).plot;
+Env([0.2, 1.0, 0.7], [1.2, 3.0], [\exp, \sin]).test(2).plot;
