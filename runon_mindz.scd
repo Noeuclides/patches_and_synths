@@ -35,6 +35,10 @@ s.waitForBoot({
     ~airBus = Bus.control(s, 1).set(0.3);
     ~spaceBus = Bus.control(s, 1).set(0.3);
     ~grainDensityBus = Bus.control(s, 1).set(10);
+    ~hollowBus   = Bus.control(s, 1).set(0.5);
+    ~violenceBus = Bus.control(s, 1).set(0.0);
+
+    ~masterBus = Bus.audio(s, 2);
 
     "✓ Global buses created".postln;
 
@@ -53,12 +57,13 @@ s.waitForBoot({
         // Movement
         lfo1rate=0.5, lfo1amt=0.5, lfo2rate=0.3, lfo2amt=0.96,
         // Output
-        pressure=0.5, pan=0, reverbSend=0.3, delaySend=0.1,air=0.3, hollow=0.5|
+        pressure=0.5, pan=0, reverbSend=0.3, delaySend=0.1,air=0.3, hollow=0.5, violence=0.0|
 
         var exciter, mallet, noise, resonated, sig;
         var envAmp, envExcite, lfo1, lfo2;
-        var resMod, brightMod;
+        var brightMod;
         var base, freqs1, freqs2;
+        var low, mid, high, fb;
 
         // ═══ ENVELOPES ═══
         envAmp = EnvGen.kr(Env.asr(0.005, 1, 1.2), gate, doneAction:2);
@@ -89,12 +94,11 @@ s.waitForBoot({
 
         // ═══ RESONATOR (dual Klank for body) ═══
 
-        resMod = resFreq;// * (1 + lfo1 + lfo2);
         brightMod = resBright + (lfo1 * 0.0);
 
-        base = resFreq.max(60); // allow low notes to track, but avoid 0/denormals
-        freqs1 = ([1, 2.01, 3.98, 5.03, 7.1] * base).clip(60, 12000);
-        freqs2 = ([1, 2.03, 4.02, 5.01, 7.2] * base).clip(60, 12000);
+        base  = resFreq.max(20);
+        freqs1 = ([1, 2.01, 3.98, 5.03, 7.1] * base).clip(20, 12000);
+        freqs2 = ([1, 2.03, 4.02, 5.01, 7.2] * base).clip(20, 12000);
 
         brightMod = resBright.clip(0.1, 1);
 
@@ -123,23 +127,33 @@ s.waitForBoot({
         resonated = LeakDC.ar(resonated);
         resonated = HPF.ar(resonated, 30);
 
-        // keep “pressure” as tone opening, but avoid hard distortion
+        // keep pressure as intensity
         resonated = resonated * (1 + (pressure * 1.2));
+
+        // subtle “amp-cab violence” feedback (safe range)
+        fb = LocalIn.ar(1);
+        resonated = resonated + (fb * (violence * 0.12));
+        fb = DelayC.ar(resonated, 0.06, LFNoise1.kr(0.3).range(0.006, 0.03));
+        fb = HPF.ar(fb, 180);
+        fb = (fb * (1 + (violence * 6))).tanh;  // violence lives mostly in the loop
+        LocalOut.ar(fb);
+
+        // multiband drive: keep fundamental clean
+        low  = LPF.ar(resonated, 220);
+        mid  = BPF.ar(resonated, 900, 0.8);
+        high = HPF.ar(resonated, 2200);
+
+        mid  = (mid  * (1 + (violence * 2.5))).tanh * 0.9;
+        high = Fold.ar(high * (1 + (violence * 5)), -0.8, 0.8) * 0.35;
+
+        resonated = low + mid + high;
+
+        // your hollowness/air layer stays great here
+        resonated = BRF.ar(resonated, hollow.linexp(0, 1, 250, 900), 0.5);
+        resonated = resonated + (HPF.ar(resonated, 4000) * (hollow * 0.15));
+
+        // final safety
         resonated = Limiter.ar(resonated, 0.9, 0.01);
-
-        resonated = BRF.ar(resonated, hollow.linexp(0, 1, 250, 900), 0.5); // scoops “box”
-        resonated = resonated + (HPF.ar(resonated, 4000) * (hollow * 0.15)); // air sheen
-        // ═══ PRESSURE / OPENING (tone evolution) ═══
-
-        // As pressure rises: more harmonics, more dirt
-        //resonated = RLPF.ar(
-          //  resonated,
-            //resOpening.linexp(0, 1, 300, 12000) * (1 + (pressure * 3)),
-            //0.3 + (pressure * 0.4)
-        //);
-
-        // Subtle saturation that grows with pressure
-        //resonated = (resonated * (1 + (pressure * 2))).tanh * 0.7;
 
         // ═══ OUTPUT ═══
 
@@ -357,6 +371,15 @@ s.waitForBoot({
         Out.ar(out, sig * amp);
     }).add;
 
+    SynthDef(\masterOut, { |in=0, out=0, pre=1, hp=25, compThresh=0.5, compSlope=0.25, lim=0.95|
+        var sig = In.ar(in, 2);
+        sig = LeakDC.ar(sig);
+        sig = HPF.ar(sig, hp);
+        sig = Compander.ar(sig, sig, compThresh, 1, compSlope, 0.01, 0.1);
+        sig = Limiter.ar(sig, lim, 0.01);
+        Out.ar(out, sig * pre);
+    }).add;
+
 
     "✓ SynthDefs compiled".postln;
 
@@ -396,7 +419,7 @@ s.waitForBoot({
 
     ~reverbNode = Synth(\globalReverb, [
         \in, ~reverbBus,
-        \out, 0,
+        \out, ~masterBus,
         \mix, 0.4,
         \room, 0.85,
         \damp, 0.6
@@ -404,7 +427,7 @@ s.waitForBoot({
 
     ~delayNode = Synth(\globalDelay, [
         \in, ~delayBus,
-        \out, 0,
+        \out, ~masterBus,
         \time, 0.375,
         \feedback, 0.35,
         \mix, 0.25
@@ -412,9 +435,12 @@ s.waitForBoot({
 
     ~droneGate = Synth(\droneGate, [
         \in, ~droneBus,
-        \out, 0,
+        \out, ~masterBus,
         \amp, 0.6
     ], addAction:\addToTail);
+
+    // master -> hardware outs
+    ~masterNode = Synth(\masterOut, [\in, ~masterBus, \out, 0], addAction:\addToTail);
 
     "✓ Global FX running".postln;
 
@@ -428,30 +454,28 @@ s.waitForBoot({
     ~voices = Dictionary.new;
 
     // Play physical modeling voice
-    ~playPhysical = { |freq=440, vel=100, pressure=0.5|
-        var amp = vel.linlin(0, 127, 0.1, 0.6);
+    ~playPhysical = { |freq=440, vel=100|
+        var amp = vel.linlin(0, 127, 0.08, 0.55);
+        var pressure = ~pressureBus.getSynchronous;
+        var air      = ~airBus.getSynchronous;
+        var hollow   = ~hollowBus.getSynchronous;
+        var violence = ~violenceBus.getSynchronous;
+
         Synth(\physicalBody, [
-            \freq, freq,
+            \out, ~masterBus,
+            \freq, freq, \resFreq, freq,
             \amp, amp,
             \pressure, pressure,
-            \malletVol, 0.5,
-            \noiseVol, 0.5,
-            \stiffness, 0.46,
-            \noiseColor, 0.52,
-            \exciterColor, 0.35,
-            \resFreq, freq,
-            \resDecay, 2.2,
-            \resBright, 0.43,
-            \resOpening, 0.0,
-            \resRatio, 0.49,
-            \lfo1rate, 0.5,
-            \lfo1amt, 0.5,
-            \lfo2rate, 0.3,
-            \lfo2amt, 0.96,
-            \reverbSend, 0.3,
-            \delaySend, 0.1
+            \air, air,
+            \hollow, hollow,
+            \violence, violence,
+
+            \resDecay, 2.2, \resBright, 0.43, \resRatio, 0.49,
+            \lfo1rate, 0.5, \lfo1amt, 0.5, \lfo2rate, 0.3, \lfo2amt, 0.96,
+            \reverbSend, 0.3, \delaySend, 0.1
         ]);
     };
+
 
     // Play sustained drone
     ~playDrone = { |freq=110, pressure=0.5, air=0.3|
@@ -489,6 +513,51 @@ s.waitForBoot({
 
     "✓ Performance helpers ready".postln;
 
+    ~sceneNodes = IdentityDictionary.new;
+
+    ~sceneStop = {
+        ~sceneNodes.do { |k, node| node.tryPerform(\set, \gate, 0) };
+        ~sceneNodes.clear;
+    };
+
+    ~sceneA = { // airy ritual bed
+        ~sceneStop.();
+        ~pressureBus.set(0.25);
+        ~airBus.set(0.65);
+        ~hollowBus.set(0.7);
+        ~violenceBus.set(0.05);
+
+        ~reverbNode.set(\mix, 0.45, \room, 0.92, \damp, 0.65);
+        ~delayNode.set(\mix, 0.18, \feedback, 0.28, \time, 0.375);
+
+        ~sceneNodes[\drone] = Synth(\bowedDrone, [
+            \out, ~droneBus, \freq, 55, \amp, 0.22,
+            \pressure, 0.25, \air, 0.65, \space, 0.6
+        ]);
+    };
+
+    ~sceneB = { // BIG|BRAVE / Psychotic Monks pressure
+        ~sceneStop.();
+        ~pressureBus.set(0.65);
+        ~airBus.set(0.35);
+        ~hollowBus.set(0.35);
+        ~violenceBus.set(0.75);
+
+        ~reverbNode.set(\mix, 0.28, \room, 0.85, \damp, 0.78);
+        ~delayNode.set(\mix, 0.22, \feedback, 0.42, \time, 0.25);
+
+        ~sceneNodes[\drone] = Synth(\bowedDrone, [
+            \out, ~droneBus, \freq, 55, \amp, 0.26,
+            \pressure, 0.75, \air, 0.35, \space, 0.35
+        ]);
+
+        ~sceneNodes[\grains] = Synth(\grainTexture, [
+            \out, ~masterBus, \buf, -1, \amp, 0.14,
+            \density, 0.55, \pressure, 0.75, \cutoff, 7500, \space, 0.35
+        ]);
+    };
+
+
     // ─────────────────────────────────────────────────────────────────────
     // 8. MIDI SETUP (basic - expand in separate file)
     // ─────────────────────────────────────────────────────────────────────
@@ -499,8 +568,8 @@ s.waitForBoot({
     // Note On
     MIDIdef.noteOn(\noteHandler, { |vel, nn, chan, src|
         var freq = nn.midicps;
-        var pressure = ~pressureBus.getSynchronous;
-        ~playPhysical.(freq, vel, pressure);
+        //var pressure = ~pressureBus.getSynchronous;
+        ~playPhysical.(freq, vel);
     });
 
     // CC 1 (mod wheel) -> pressure
@@ -517,6 +586,8 @@ s.waitForBoot({
     MIDIdef.cc(\ccSpace, { |val|
         ~reverbNode.set(\mix, val.linlin(0, 127, 0, 0.7));
     }, 3);
+    MIDIdef.cc(\ccHollow,   { |val| ~hollowBus.set(val/127) }, 4);   // CC4 -> hollow
+    MIDIdef.cc(\ccViolence, { |val| ~violenceBus.set(val/127) },8); // CC11 -> violence
 
     "✓ MIDI connected (basic mappings active)".postln;
 
@@ -538,3 +609,7 @@ s.waitForBoot({
     "═══════════════════════════════════════════════════════════════".postln;
 });
 )
+
+~sceneA.();
+~sceneB.();
+~sceneStop.();
