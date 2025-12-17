@@ -53,11 +53,12 @@ s.waitForBoot({
         // Movement
         lfo1rate=0.5, lfo1amt=0.5, lfo2rate=0.3, lfo2amt=0.96,
         // Output
-        pressure=0.5, pan=0, reverbSend=0.3, delaySend=0.1|
+        pressure=0.5, pan=0, reverbSend=0.3, delaySend=0.1,air=0.3, hollow=0.5|
 
         var exciter, mallet, noise, resonated, sig;
         var envAmp, envExcite, lfo1, lfo2;
         var resMod, brightMod;
+        var base, freqs1, freqs2;
 
         // ═══ ENVELOPES ═══
         envAmp = EnvGen.kr(Env.asr(0.005, 1, 1.2), gate, doneAction:2);
@@ -77,54 +78,68 @@ s.waitForBoot({
         ) * envExcite * malletVol;
 
         // Noise: bow scrape / breath attack
-        noise = LPF.ar(
+        noise = BPF.ar(
             WhiteNoise.ar(),
-            noiseColor.linexp(0, 1, 400, 8000)
-        ) * envExcite * noiseVol * 0.7;
+            noiseColor.linexp(0, 1, 800, 12000),
+            0.6
+        ) * envExcite * noiseVol * (0.4 + (air * 0.8));
 
-        exciter = mallet;// + noise;
+        // Blend mallet -> noise by hollow (0=solid, 1=hollow/air)
+        exciter = XFade2.ar(mallet, noise, (hollow * 2) - 1);
 
         // ═══ RESONATOR (dual Klank for body) ═══
 
         resMod = resFreq;// * (1 + lfo1 + lfo2);
         brightMod = resBright + (lfo1 * 0.0);
 
+        base = resFreq.max(60); // allow low notes to track, but avoid 0/denormals
+        freqs1 = ([1, 2.01, 3.98, 5.03, 7.1] * base).clip(60, 12000);
+        freqs2 = ([1, 2.03, 4.02, 5.01, 7.2] * base).clip(60, 12000);
+
+        brightMod = resBright.clip(0.1, 1);
+
         // Two parallel resonator banks for stereo depth
         resonated = Klank.ar(
             `[
-                [1, 2.01, 3.98, 5.03, 7.1] * resMod.clip(80, 8000),  // partials
-                [1, 0.7, 0.5, 0.3, 0.2] * brightMod.clip(0.1, 1),    // amps
-                [1, 0.8, 0.6, 0.4, 0.3] * resDecay                    // decays
+                freqs1,
+                [1, 0.7, 0.5, 0.3, 0.2] * brightMod,
+                [1, 0.8, 0.6, 0.4, 0.3] * resDecay
             ],
             exciter,
-            freqscale: 1,
-            freqoffset: 0,
             decayscale: resRatio.linlin(0, 1, 0.5, 2.0)
         );
 
         resonated = resonated + Klank.ar(
             `[
-                [1, 2.03, 4.02, 5.01, 7.2] * resMod.clip(80, 8000),
-                [1, 0.65, 0.48, 0.28, 0.18] * brightMod.clip(0.1, 1),
+                freqs2,
+                [1, 0.65, 0.48, 0.28, 0.18] * brightMod,
                 [1, 0.85, 0.65, 0.42, 0.32] * resDecay
             ],
             exciter * 0.9,
-            freqscale: 1,
-            freqoffset: 0,
             decayscale: resRatio.linlin(0, 1, 0.5, 2.0)
         );
 
+        // cleanup + keep it clear
+        resonated = LeakDC.ar(resonated);
+        resonated = HPF.ar(resonated, 30);
+
+        // keep “pressure” as tone opening, but avoid hard distortion
+        resonated = resonated * (1 + (pressure * 1.2));
+        resonated = Limiter.ar(resonated, 0.9, 0.01);
+
+        resonated = BRF.ar(resonated, hollow.linexp(0, 1, 250, 900), 0.5); // scoops “box”
+        resonated = resonated + (HPF.ar(resonated, 4000) * (hollow * 0.15)); // air sheen
         // ═══ PRESSURE / OPENING (tone evolution) ═══
 
         // As pressure rises: more harmonics, more dirt
-        resonated = RLPF.ar(
-            resonated,
-            resOpening.linexp(0, 1, 300, 12000) * (1 + (pressure * 3)),
-            0.3 + (pressure * 0.4)
-        );
+        //resonated = RLPF.ar(
+          //  resonated,
+            //resOpening.linexp(0, 1, 300, 12000) * (1 + (pressure * 3)),
+            //0.3 + (pressure * 0.4)
+        //);
 
         // Subtle saturation that grows with pressure
-        resonated = (resonated * (1 + (pressure * 2))).tanh * 0.7;
+        //resonated = (resonated * (1 + (pressure * 2))).tanh * 0.7;
 
         // ═══ OUTPUT ═══
 
@@ -192,78 +207,115 @@ s.waitForBoot({
 
 
     SynthDef(\metalHitPlayer, {
-        |out=0, buf=0, gate=1, amp=0.5,
-        rate=1.0, start=0, pressure=0.3,
+        |out=0, buf=(-1), gate=1, amp=0.5, 
+        rate=1.0, start=0, pressure=0.3, 
         cutoff=8000, resonance=0.3,
         pan=0, reverbSend=0.5, delaySend=0.2|
-
+        
         var sig, filt, envAmp, envTone;
-
+        var sampleSig, synthSig, noise, body, useSample;
+        
         envAmp = EnvGen.kr(Env.asr(0.001, 1, 0.8), gate, doneAction:2);
         envTone = EnvGen.kr(Env.perc(0.01, 1.5), gate);
-
-        // Sample playback
-        sig = PlayBuf.ar(1, buf, rate * BufRateScale.kr(buf), gate, start * BufFrames.kr(buf), loop:0);
-
+        
+        // Generate both signals, then select
+        sampleSig = PlayBuf.ar(1, buf.max(0), rate * BufRateScale.kr(buf.max(0)), gate, start * BufFrames.kr(buf.max(0)), loop:0);
+        
+        noise = WhiteNoise.ar() * EnvGen.kr(Env.perc(0.001, 0.05));
+        body = Klank.ar(
+            `[
+                [1, 2.4, 3.7, 5.2, 7.8, 11.3] * (200 * rate),  // metallic ratios
+                [1, 0.6, 0.4, 0.3, 0.2, 0.15],
+                [0.8, 0.6, 0.5, 0.4, 0.3, 0.2]
+            ],
+            noise
+        ) * 0.7;
+        synthSig = body;
+        
+        // Select which to use (buf < 0 means use synth)
+        useSample = (buf >= 0);
+        sig = Select.ar(useSample, [synthSig, sampleSig]);
+        
         // Tonal evolution: filter opens with envelope
         filt = RLPF.ar(
             sig,
-            cutoff.linexp(0, 1, 300, 12000) * (0.5 + (envTone * 1.5)),
+            cutoff.linexp(0.1, 1, 300, 12000) * (0.5 + (envTone * 1.5)),
             resonance.linlin(0, 1, 0.9, 0.1)
         );
-
+        
+        // High-pass for clarity
+        filt = HPF.ar(filt, 60);
+        
         // Pressure adds grit
         filt = (filt * (1 + (pressure * 3))).tanh;
-
+        
         sig = filt * envAmp * amp;
         sig = Pan2.ar(sig, pan);
-
+        
         Out.ar(~reverbBus, sig * reverbSend);
         Out.ar(~delayBus, sig * delaySend);
         Out.ar(out, sig);
     }).add;
-
-
+    
+    
     SynthDef(\grainTexture, {
-        |out=0, gate=1, buf=0, amp=0.3,
+        |out=0, gate=1, buf=(-1), amp=0.3,
         density=10, speed=1.0, pitch=1.0,
         spray=0.1, pressure=0.5, pan=0,
         cutoff=4000, space=0.4|
-
+        
         var sig, filt, envAmp;
-        var trate, dur, clk, pos, pan2;
-
+        var sampleSig, synthSig, useSample;
+        var trate, dur, clk, pos;
+        var grains;
+        
         envAmp = EnvGen.kr(Env.asr(0.3, 1, 1.5), gate, doneAction:2);
-
-        // Grain parameters modulate with pressure
-        trate = density.linexp(0, 1, 2, 80) * (1 + (pressure * 2));
-        dur = 0.08 / (density + 1);
+        
+        // Sample-based granular
+        trate = density.linexp(0.01, 1, 2, 80) * (1 + (pressure * 2));
+        dur = 0.08 / (density.linexp(0.01, 1, 0.1, 20) + 1);
         clk = Impulse.kr(trate);
-
-        // Playback position drifts
-        pos = Phasor.kr(clk, speed * BufRateScale.kr(buf), 0, BufFrames.kr(buf));
-        pos = pos + LFNoise1.kr(2).bipolar(spray * BufFrames.kr(buf) * 0.3);
-
-        sig = GrainBuf.ar(
-            2,  // stereo
+        pos = Phasor.kr(clk, speed * BufRateScale.kr(buf.max(0)), 0, BufFrames.kr(buf.max(0)));
+        pos = pos + LFNoise1.kr(2).bipolar(spray * BufFrames.kr(buf.max(0)) * 0.3);
+        
+        sampleSig = GrainBuf.ar(
+            2,
             clk,
             dur,
-            buf,
+            buf.max(0),
             pitch,
-            pos / BufFrames.kr(buf),
+            pos / BufFrames.kr(buf.max(0)),
             2,
             pan + LFNoise1.kr(0.5).bipolar(0.4)
         );
-
+        
+        // Synthesized granular texture
+        grains = Mix.fill(8, { |i|
+            var env, osc;
+            env = EnvGen.ar(
+                Env.sine(dur),
+                Dust.ar(trate + (i * 3))
+            );
+            osc = SinOsc.ar(
+                TRand.ar(200, 3000, env) * pitch,
+                Rand(0, 2pi)
+            );
+            Pan2.ar(osc * env, TRand.ar(-0.8, 0.8, env));
+        }) * 0.15;
+        synthSig = grains;
+        
+        // Select which to use
+        useSample = (buf >= 0);
+        sig = Select.ar(useSample, [synthSig, sampleSig]);
+        
         // Filter softens harsh grains
-        filt = BLowPass4.ar(sig, cutoff * (1 + (pressure * 2)), 0.5);
-
+        filt = BLowPass4.ar(sig, cutoff * (1 + (pressure * 2)).clip(100, 18000), 0.5);
+        
         sig = filt * envAmp * amp * 0.7;
-
+        
         Out.ar(~reverbBus, sig * space);
         Out.ar(out, sig);
     }).add;
-
 
     // ─────────────────────────────────────────────────────────────────────
     // 4. GLOBAL FX
@@ -413,34 +465,19 @@ s.waitForBoot({
         ]);
     };
 
-    ~playDrone = { |freq=110, pressure=0.5, air=0.3|
-        Synth(\bowedDrone, [
-            \out, ~droneBus,
-            \freq, freq,
-            \amp, 0.25,
+    ~triggerMetal = { |bufKey=\metal1, rate=1.0, pressure=0.3|
+        Synth(\metalHitPlayer, [
+            \rate, rate,
             \pressure, pressure,
-            \air, air,
-            \space, 0.5
+            \cutoff, 8000,
+            \resonance, 0.3,
+            \reverbSend, 0.6,
+            \delaySend, 0.3
         ]);
     };
 
-    // Trigger metal sample
-    ~triggerMetal = { |bufKey=\metal1, rate=1.0, pressure=0.3|
-        if(~buffers[bufKey].notNil, {
-            Synth(\metalHitPlayer, [
-                \buf, ~buffers[bufKey],
-                \rate, rate,
-                \pressure, pressure,
-                \cutoff, 8000,
-                \resonance, 0.3,
-                \reverbSend, 0.6,
-                \delaySend, 0.3
-            ]);
-        });
-    };
-
-    ~triggerMetal = { |bufKey=\metal1, rate=1.0, pressure=0.3|
-        Synth(\metalHitPlayer, [
+    ~triggerGrain = { |bufKey=\metal1, rate=1.0, pressure=0.3|
+        Synth(\grainTexture, [
             \rate, rate,
             \pressure, pressure,
             \cutoff, 8000,
@@ -501,6 +538,3 @@ s.waitForBoot({
     "═══════════════════════════════════════════════════════════════".postln;
 });
 )
-
-~playPhysical.(440, 80);
-~playDrone.(110, 0.6, 0.4);
