@@ -136,6 +136,7 @@ s.waitForBoot({
         fb = DelayC.ar(resonated, 0.06, LFNoise1.kr(0.3).range(0.006, 0.03));
         fb = HPF.ar(fb, 180);
         fb = (fb * (1 + (violence * 6))).tanh;  // violence lives mostly in the loop
+        fb = Limiter.ar(fb, 0.6, 0.01);
         LocalOut.ar(fb);
 
         // multiband drive: keep fundamental clean
@@ -221,20 +222,21 @@ s.waitForBoot({
 
 
     SynthDef(\metalHitPlayer, {
-        |out=0, buf=(-1), gate=1, amp=0.5, 
-        rate=1.0, start=0, pressure=0.3, 
+        |out=0, buf=(-1), gate=1, amp=0.5,
+        rate=1.0, start=0, pressure=0.3,
         cutoff=8000, resonance=0.3,
         pan=0, reverbSend=0.5, delaySend=0.2|
-        
+
         var sig, filt, envAmp, envTone;
         var sampleSig, synthSig, noise, body, useSample;
-        
+
         envAmp = EnvGen.kr(Env.asr(0.001, 1, 0.8), gate, doneAction:2);
+        //envAmp = EnvGen.kr(Env.perc(0.001, 0.9), doneAction:2);
         envTone = EnvGen.kr(Env.perc(0.01, 1.5), gate);
-        
+
         // Generate both signals, then select
         sampleSig = PlayBuf.ar(1, buf.max(0), rate * BufRateScale.kr(buf.max(0)), gate, start * BufFrames.kr(buf.max(0)), loop:0);
-        
+
         noise = WhiteNoise.ar() * EnvGen.kr(Env.perc(0.001, 0.05));
         body = Klank.ar(
             `[
@@ -245,53 +247,53 @@ s.waitForBoot({
             noise
         ) * 0.7;
         synthSig = body;
-        
+
         // Select which to use (buf < 0 means use synth)
         useSample = (buf >= 0);
         sig = Select.ar(useSample, [synthSig, sampleSig]);
-        
+
         // Tonal evolution: filter opens with envelope
         filt = RLPF.ar(
             sig,
             cutoff.linexp(0.1, 1, 300, 12000) * (0.5 + (envTone * 1.5)),
             resonance.linlin(0, 1, 0.9, 0.1)
         );
-        
+
         // High-pass for clarity
         filt = HPF.ar(filt, 60);
-        
+
         // Pressure adds grit
         filt = (filt * (1 + (pressure * 3))).tanh;
-        
+
         sig = filt * envAmp * amp;
         sig = Pan2.ar(sig, pan);
-        
+
         Out.ar(~reverbBus, sig * reverbSend);
         Out.ar(~delayBus, sig * delaySend);
         Out.ar(out, sig);
     }).add;
-    
-    
+
+
     SynthDef(\grainTexture, {
         |out=0, gate=1, buf=(-1), amp=0.3,
         density=10, speed=1.0, pitch=1.0,
         spray=0.1, pressure=0.5, pan=0,
         cutoff=4000, space=0.4|
-        
+
         var sig, filt, envAmp;
         var sampleSig, synthSig, useSample;
         var trate, dur, clk, pos;
         var grains;
-        
+
         envAmp = EnvGen.kr(Env.asr(0.3, 1, 1.5), gate, doneAction:2);
-        
+
         // Sample-based granular
         trate = density.linexp(0.01, 1, 2, 80) * (1 + (pressure * 2));
         dur = 0.08 / (density.linexp(0.01, 1, 0.1, 20) + 1);
         clk = Impulse.kr(trate);
         pos = Phasor.kr(clk, speed * BufRateScale.kr(buf.max(0)), 0, BufFrames.kr(buf.max(0)));
         pos = pos + LFNoise1.kr(2).bipolar(spray * BufFrames.kr(buf.max(0)) * 0.3);
-        
+
         sampleSig = GrainBuf.ar(
             2,
             clk,
@@ -302,7 +304,7 @@ s.waitForBoot({
             2,
             pan + LFNoise1.kr(0.5).bipolar(0.4)
         );
-        
+
         // Synthesized granular texture
         grains = Mix.fill(8, { |i|
             var env, osc;
@@ -317,16 +319,16 @@ s.waitForBoot({
             Pan2.ar(osc * env, TRand.ar(-0.8, 0.8, env));
         }) * 0.15;
         synthSig = grains;
-        
+
         // Select which to use
         useSample = (buf >= 0);
         sig = Select.ar(useSample, [synthSig, sampleSig]);
-        
+
         // Filter softens harsh grains
         filt = BLowPass4.ar(sig, cutoff * (1 + (pressure * 2)).clip(100, 18000), 0.5);
-        
+
         sig = filt * envAmp * amp * 0.7;
-        
+
         Out.ar(~reverbBus, sig * space);
         Out.ar(out, sig);
     }).add;
@@ -451,7 +453,7 @@ s.waitForBoot({
     // ─────────────────────────────────────────────────────────────────────
 
     // Voice pool for polyphony
-    ~voices = Dictionary.new;
+    ~voices = IdentityDictionary.new;
 
     // Play physical modeling voice
     ~playPhysical = { |freq=440, vel=100|
@@ -516,80 +518,173 @@ s.waitForBoot({
     ~sceneNodes = IdentityDictionary.new;
 
     ~sceneStop = {
-        ~sceneNodes.do { |k, node| node.tryPerform(\set, \gate, 0) };
-        ~sceneNodes.clear;
-    };
+		// Kill any manually triggered layers if they exist
+		~sceneNodes.do { |node| node.tryPerform(\set, \gate, 0) };
+		~sceneNodes.clear;
+	};
 
-    ~sceneA = { // airy ritual bed
-        ~sceneStop.();
-        ~pressureBus.set(0.25);
-        ~airBus.set(0.65);
-        ~hollowBus.set(0.7);
-        ~violenceBus.set(0.05);
+	~sceneA = {
+		~sceneStop.();
 
-        ~reverbNode.set(\mix, 0.45, \room, 0.92, \damp, 0.65);
-        ~delayNode.set(\mix, 0.18, \feedback, 0.28, \time, 0.375);
+		// Set control bus values
+		~pressureBus.set(0.25);
+		~airBus.set(0.65);
+		~hollowBus.set(0.7);
+		~violenceBus.set(0.05);
 
-        ~sceneNodes[\drone] = Synth(\bowedDrone, [
-            \out, ~droneBus, \freq, 55, \amp, 0.22,
-            \pressure, 0.25, \air, 0.65, \space, 0.6
-        ]);
-    };
+		// Configure FX for spacious sound
+		~reverbNode.set(\mix, 0.45, \room, 0.92, \damp, 0.65);
+		~delayNode.set(\mix, 0.18, \feedback, 0.28, \time, 0.375);
 
-    ~sceneB = { // BIG|BRAVE / Psychotic Monks pressure
-        ~sceneStop.();
-        ~pressureBus.set(0.65);
-        ~airBus.set(0.35);
-        ~hollowBus.set(0.35);
-        ~violenceBus.set(0.75);
+		">>> Scene A: Airy Ritual (hollow, spacious)".postln;
+	};
 
-        ~reverbNode.set(\mix, 0.28, \room, 0.85, \damp, 0.78);
-        ~delayNode.set(\mix, 0.22, \feedback, 0.42, \time, 0.25);
+	~sceneB = {
+		~sceneStop.();
 
-        ~sceneNodes[\drone] = Synth(\bowedDrone, [
-            \out, ~droneBus, \freq, 55, \amp, 0.26,
-            \pressure, 0.75, \air, 0.35, \space, 0.35
-        ]);
+		~pressureBus.set(0.65);
+		~airBus.set(0.35);
+		~hollowBus.set(0.35);
+		~violenceBus.set(0.75);
 
-        ~sceneNodes[\grains] = Synth(\grainTexture, [
-            \out, ~masterBus, \buf, -1, \amp, 0.14,
-            \density, 0.55, \pressure, 0.75, \cutoff, 7500, \space, 0.35
-        ]);
-    };
+		~reverbNode.set(\mix, 0.28, \room, 0.85, \damp, 0.78);
+		~delayNode.set(\mix, 0.22, \feedback, 0.42, \time, 0.25);
 
+		">>> Scene B: Pressure/Violence (crushing, aggressive)".postln;
+	};
 
-    // ─────────────────────────────────────────────────────────────────────
-    // 8. MIDI SETUP (basic - expand in separate file)
-    // ─────────────────────────────────────────────────────────────────────
+	~sceneC = {
+		~sceneStop.();
 
-    MIDIClient.init;
-    MIDIIn.connectAll;
+		~pressureBus.set(0.45);
+		~airBus.set(0.55);
+		~hollowBus.set(0.6);
+		~violenceBus.set(0.15);
 
-    // Note On
-    MIDIdef.noteOn(\noteHandler, { |vel, nn, chan, src|
-        var freq = nn.midicps;
-        //var pressure = ~pressureBus.getSynchronous;
-        ~playPhysical.(freq, vel);
-    });
+		~reverbNode.set(\mix, 0.35, \room, 0.78, \damp, 0.72);
+		~delayNode.set(\mix, 0.25, \feedback, 0.38, \time, 0.4);
 
-    // CC 1 (mod wheel) -> pressure
-    MIDIdef.cc(\ccPressure, { |val|
-        ~pressureBus.set(val.linlin(0, 127, 0, 1));
-    }, 1);
+		">>> Scene C: Humid Electronics (unstable, physical)".postln;
+	};
 
-    // CC 74 -> air/breath
-    MIDIdef.cc(\ccAir, { |val|
-        ~airBus.set(val.linlin(0, 127, 0, 1));
-    }, 2);
+	~sceneD = {
+		~sceneStop.();
 
-    // CC 91 -> reverb send
-    MIDIdef.cc(\ccSpace, { |val|
-        ~reverbNode.set(\mix, val.linlin(0, 127, 0, 0.7));
-    }, 3);
-    MIDIdef.cc(\ccHollow,   { |val| ~hollowBus.set(val/127) }, 4);   // CC4 -> hollow
-    MIDIdef.cc(\ccViolence, { |val| ~violenceBus.set(val/127) },8); // CC11 -> violence
+		~pressureBus.set(0.7);
+		~airBus.set(0.8);
+		~hollowBus.set(0.4);
+		~violenceBus.set(0.55);
 
-    "✓ MIDI connected (basic mappings active)".postln;
+		~reverbNode.set(\mix, 0.25, \room, 0.82, \damp, 0.8);
+		~delayNode.set(\mix, 0.15, \feedback, 0.25, \time, 0.125);
+
+		">>> Scene D: Body Resonance (breathing, straining)".postln;
+	};
+
+	~sceneClean = { // Reset to neutral
+		~sceneStop.();
+
+		~pressureBus.set(0.5);
+		~airBus.set(0.3);
+		~hollowBus.set(0.5);
+		~violenceBus.set(0.0);
+
+		~reverbNode.set(\mix, 0.3, \room, 0.8, \damp, 0.6);
+		~delayNode.set(\mix, 0.2, \feedback, 0.35, \time, 0.375);
+
+		">>> Scene: Clean/Neutral".postln;
+	};
+
+	// ─────────────────────────────────────────────────────────────────────
+	// 8. MIDI SETUP - FIXED VOICE MANAGEMENT
+	// ─────────────────────────────────────────────────────────────────────
+
+	MIDIClient.init;
+	MIDIIn.connectAll;
+
+	// Voice pool with proper cleanup
+	~voices = IdentityDictionary.new;
+	~maxVoices = 8;
+
+	// Helper: force-free a voice and remove from pool
+	~freeVoice = { |key|
+		~voices[key].tryPerform(\free); // force free instead of gate
+		~voices.removeAt(key);
+	};
+
+	// Helper: enforce voice limit (oldest-first)
+	~enforceVoiceLimit = {
+		while { ~voices.size >= ~maxVoices } {
+			var oldestKey = ~voices.keys.asArray.first;
+			("Freeing oldest voice: " ++ oldestKey).postln;
+			~freeVoice.(oldestKey);
+		};
+	};
+
+	MIDIdef.noteOn(\noteOn, { |vel, nn, chan|
+		var key = (chan * 128) + nn; // unique key per note
+		var freq = nn.midicps;
+
+		// If this note is already playing, free it first
+		if(~voices[key].notNil, {
+			~freeVoice.(key);
+		});
+
+		// Enforce voice limit BEFORE spawning
+		~enforceVoiceLimit.();
+
+		// Spawn new voice
+		~voices[key] = Synth(\physicalBody, [
+			\out, ~masterBus,
+			\freq, freq,
+			\resFreq, freq,
+			\amp, vel.linlin(0, 127, 0.08, 0.55),
+			\pressure, ~pressureBus.getSynchronous,
+			\air, ~airBus.getSynchronous,
+			\hollow, ~hollowBus.getSynchronous,
+			\violence, ~violenceBus.getSynchronous,
+			\gate, 1
+		]);
+
+		// ("Note ON:  " ++ nn ++ " | Voices: " ++ ~voices.size).postln;
+	});
+
+	MIDIdef.noteOff(\noteOff, { |vel, nn, chan|
+		var key = (chan * 128) + nn;
+
+		if(~voices[key].notNil, {
+			// Send gate=0 to trigger envelope release
+			~voices[key].set(\gate, 0);
+
+			// Remove from pool immediately (node will free itself via doneAction:2)
+			~voices.removeAt(key);
+
+			// ("Note OFF: " ++ nn ++ " | Voices: " ++ ~voices.size).postln;
+		});
+	});
+
+	// CC mappings (unchanged)
+	MIDIdef.cc(\ccPressure, { |val|
+		~pressureBus.set(val.linlin(0, 127, 0, 1));
+	}, 1);
+
+	MIDIdef.cc(\ccAir, { |val|
+		~airBus.set(val.linlin(0, 127, 0, 1));
+	}, 2);
+
+	MIDIdef.cc(\ccSpace, { |val|
+		~reverbNode.set(\mix, val.linlin(0, 127, 0, 0.7));
+	}, 3);
+
+	MIDIdef.cc(\ccHollow, { |val|
+		~hollowBus.set(val / 127)
+	}, 4);
+
+	MIDIdef.cc(\ccViolence, { |val|
+		~violenceBus.set(val / 127)
+	}, 8);
+
+	"✓ MIDI connected (fixed voice management)".postln;
 
     // ─────────────────────────────────────────────────────────────────────
     // 9. STATUS REPORT
@@ -610,6 +705,10 @@ s.waitForBoot({
 });
 )
 
+s.freeAll;
+~voices.clear;
+s.queryAllNodes;
 ~sceneA.();
 ~sceneB.();
 ~sceneStop.();
+~playPhysical.(440, 80)".postln;
